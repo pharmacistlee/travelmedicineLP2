@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voyax Travel Med Recommender — Single File</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://unpkg.com"/>
+  <link rel="dns-prefetch" href="https://unpkg.com"/>
+</head>
+<body class="bg-slate-100 text-slate-900">
+  <div id="root"></div>
+
+  <!-- React 18 UMD + Babel for JSX in a single file -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useMemo, useState } = React;
+
+    // -----------------------------
+    // Knowledge base (sample; extend freely)
+    // -----------------------------
+    const COUNTRY_DB = {
+      Kenya: {
+        entry: {
+          yellow_fever_certificate_required_if_arriving_from_endemic_country: true,
+        },
+        risks: {
+          malaria: {
+            present: true,
+            chemo_options: ["malarone", "doxycycline", "mefloquine"],
+            region_exceptions: ["Nairobi"],
+            seasonality: "year_round",
+          },
+          typhoid: { level: "high" },
+          hepatitis_a: { level: "high" },
+          rabies: { level: "medium" },
+          cholera: { level: "sporadic" },
+          yellow_fever: { transmission_regions: "some_regions" },
+        },
+      },
+      Tanzania: {
+        entry: {
+          yellow_fever_certificate_required_if_arriving_from_endemic_country: true,
+        },
+        risks: {
+          malaria: { present: true, chemo_options: ["malarone", "doxycycline", "mefloquine"] },
+          typhoid: { level: "high" },
+          hepatitis_a: { level: "high" },
+          rabies: { level: "medium" },
+          yellow_fever: { transmission_regions: "some_regions" },
+        },
+      },
+      Peru: {
+        entry: {},
+        risks: {
+          malaria: { present: false, chemo_options: [] },
+          typhoid: { level: "medium" },
+          hepatitis_a: { level: "medium" },
+          rabies: { level: "low" },
+          altitude: { spots: ["Cusco", "Puno"], threshold_m: 2500 },
+          yellow_fever: { transmission_regions: "amazon" },
+        },
+      },
+      Thailand: {
+        entry: {},
+        risks: {
+          malaria: {
+            present: true,
+            chemo_options: ["malarone", "doxycycline", "mefloquine"],
+            region_exceptions: ["Bangkok", "Chiang Mai city"],
+          },
+          typhoid: { level: "medium" },
+          hepatitis_a: { level: "high" },
+          rabies: { level: "medium" },
+          cholera: { level: "sporadic" },
+        },
+      },
+    };
+
+    const PRODUCTS = [
+      // Entry / proof
+      {
+        id: "yellow_fever_entry",
+        label: "Yellow Fever vaccine (YF‑VAX) — certificate for entry",
+        type: "entry",
+        branch: "yellow_fever_entry",
+        notes: ["Required if arriving from YF‑endemic country in some destinations."],
+        contraindications: [
+          { if: { field: "traveler.age", op: "<", value: 0.5 }, why: "Infant < 6 months" },
+          { if: { in: "traveler.allergies", value: "egg" }, why: "Severe egg allergy" },
+          { if: { in: "traveler.allergies", value: "gelatin" }, why: "Gelatin allergy" },
+          { if: { field: "traveler.immunocompromised", op: "==", value: true }, why: "Severe immunodeficiency" },
+          { if: { field: "traveler.pregnant", op: "==", value: true }, why: "Pregnancy (risk/benefit)" },
+        ],
+      },
+      // Malaria prophylaxis
+      {
+        id: "malarone",
+        label: "Atovaquone/Proguanil (Malarone)",
+        type: "prophylaxis",
+        branch: "malaria",
+        for: "malaria",
+        notes: ["Start 1–2 days before, daily during, 7 days after."],
+        contraindications: [
+          { if: { field: "traveler.renal_crcl", op: "<", value: 30 }, why: "CrCl < 30 mL/min" },
+          { if: { field: "traveler.pregnant", op: "==", value: true }, why: "Pregnancy (precaution)" },
+        ],
+      },
+      {
+        id: "doxycycline",
+        label: "Doxycycline",
+        type: "prophylaxis",
+        branch: "malaria",
+        for: "malaria",
+        notes: ["Daily; photosensitivity; continue 4 weeks after."],
+        cautions: ["Photosensitivity; sun protection"],
+        contraindications: [
+          { if: { field: "traveler.age", op: "<", value: 8 }, why: "Age < 8" },
+          { if: { field: "traveler.pregnant", op: "==", value: true }, why: "Pregnancy" },
+        ],
+      },
+      {
+        id: "mefloquine",
+        label: "Mefloquine",
+        type: "prophylaxis",
+        branch: "malaria",
+        for: "malaria",
+        notes: ["Weekly; begin ≥2 weeks before."],
+        contraindications: [
+          { if: { any_of: ["anxiety", "depression", "psychosis", "seizure"], in: "traveler.conditions" }, why: "Psych/seizure history" },
+          { if: { field: "traveler.cardiac_conduction_issue", op: "==", value: true }, why: "Conduction disorder" },
+        ],
+      },
+      // Traveler's diarrhea
+      {
+        id: "azithromycin",
+        label: "Azithromycin",
+        type: "treatment",
+        branch: "td",
+        for: "travelers_diarrhea",
+        contraindications: [
+          { if: { in: "traveler.allergies", value: "macrolide" }, why: "Macrolide allergy" },
+          { if: { field: "traveler.qt_history", op: "==", value: true }, why: "History of QT prolongation" },
+        ],
+      },
+      {
+        id: "ciprofloxacin",
+        label: "Ciprofloxacin",
+        type: "treatment",
+        branch: "td",
+        for: "travelers_diarrhea",
+        contraindications: [
+          { if: { in: "traveler.allergies", value: "quinolone" }, why: "Quinolone allergy" },
+          { if: { any_of: ["tendon_disorder"], in: "traveler.conditions" }, why: "Tendinopathy/rupture risk" },
+          { if: { field: "traveler.pregnant", op: "==", value: true }, why: "Pregnancy (avoid)" },
+        ],
+      },
+      { id: "rifaximin", label: "Rifaximin", type: "treatment", branch: "td", for: "travelers_diarrhea", notes: ["Not for febrile or bloody diarrhea (likely invasive)."] },
+      // Altitude
+      {
+        id: "acetazolamide",
+        label: "Acetazolamide",
+        type: "prophylaxis",
+        branch: "altitude",
+        for: "altitude_sickness",
+        contraindications: [
+          { if: { in: "traveler.allergies", value: "sulfa" }, why: "Sulfonamide allergy" },
+          { if: { field: "traveler.renal_crcl", op: "<", value: 30 }, why: "Renal impairment" },
+          { if: { field: "traveler.pregnant", op: "==", value: true }, why: "Pregnancy (precaution)" },
+        ],
+      },
+      // Vaccines
+      { id: "typhim_vi", label: "Typhoid (Typhim Vi)", type: "vaccine", branch: "typhoid" },
+      { id: "vivotif", label: "Typhoid (Vivotif, oral)", type: "vaccine", branch: "typhoid",
+        contraindications: [
+          { if: { field: "traveler.immunocompromised", op: "==", value: true }, why: "Live-attenuated (avoid)" },
+          { if: { field: "traveler.pregnant", op: "==", value: true }, why: "Pregnancy (avoid)" },
+        ]},
+      { id: "havrix_avaqta", label: "Hepatitis A (Havrix/Vaqta)", type: "vaccine", branch: "hep_a" },
+      { id: "rabies_prEP", label: "Rabies pre‑exposure (Imovax/RabAvert)", type: "vaccine", branch: "rabies" },
+    ];
+
+    // -----------------------------
+    // Helpers
+    // -----------------------------
+    function getPath(obj, path) {
+      return path.split(".").reduce((acc, key) => (acc ? acc[key] : undefined), obj);
+    }
+
+    function evalIf(expr, ctx) {
+      if (expr.field) {
+        const left = getPath(ctx, expr.field);
+        const { op, value } = expr;
+        switch (op) {
+          case "<": return left < value;
+          case "<=": return left <= value;
+          case ">": return left > value;
+          case ">=": return left >= value;
+          case "==": return left === value;
+          case "!=": return left !== value;
+          default: return false;
+        }
+      }
+      if (expr.any_of && expr.in) {
+        const arr = getPath(ctx, expr.in) || [];
+        return expr.any_of.some((t) => arr.includes(t));
+      }
+      if (expr.in && expr.value) {
+        const arr = getPath(ctx, expr.in) || [];
+        return arr.includes(expr.value);
+      }
+      return false;
+    }
+
+    function requiresYellowFeverEntry(trip) {
+      return trip.countries.some((c) =>
+        COUNTRY_DB[c]?.entry?.yellow_fever_certificate_required_if_arriving_from_endemic_country &&
+        trip.arriving_from_endemic_country
+      );
+    }
+
+    function hasMalariaRisk(trip) {
+      return trip.countries.some((c) => COUNTRY_DB[c]?.risks?.malaria?.present);
+    }
+
+    function foodWaterRiskMedium(trip) {
+      return trip.countries.some((c) => {
+        const t = COUNTRY_DB[c]?.risks?.typhoid?.level;
+        return t === "medium" || t === "high";
+      });
+    }
+
+    function needsAltitude(trip) {
+      return (trip.altitude_m ?? 0) >= 2500;
+    }
+
+    function rabiesMediumOrHigher(trip, activities) {
+      const destRisk = trip.countries.some((c) => {
+        const level = COUNTRY_DB[c]?.risks?.rabies?.level;
+        return level === "medium" || level === "high";
+      });
+      const exposure = activities.includes("animal_contact") || activities.includes("rural");
+      return destRisk && exposure;
+    }
+
+    function evaluate(traveler, trip) {
+      const ctx = { traveler, trip };
+      const plan = [];
+
+      const pushBranch = (branch, why) => {
+        const options = PRODUCTS.filter((p) => p.branch === branch);
+        const excluded = [];
+        const candidates = options.filter((p) => {
+          const fails = (p.contraindications || []).filter((c) => evalIf(c.if, ctx));
+          if (fails.length) {
+            excluded.push({ productId: p.id, reason: fails.map((f) => f.why).join("; ") });
+            return false;
+          }
+          return true;
+        });
+
+        // simple tie-breaker for malaria: malarone > doxycycline > mefloquine
+        const ordered = candidates.sort((a, b) => {
+          const pref = ["yellow_fever_entry", "malarone", "doxycycline", "mefloquine", "azithromycin", "ciprofloxacin", "rifaximin", "acetazolamide"]; 
+          return pref.indexOf(a.id) - pref.indexOf(b.id);
+        });
+
+        ordered.forEach((p) =>
+          plan.push({
+            productId: p.id,
+            label: p.label,
+            branch,
+            reason: [why],
+            cautions: p.cautions || [],
+            notes: p.notes || [],
+            excluded,
+          })
+        );
+      };
+
+      if (requiresYellowFeverEntry(trip)) {
+        pushBranch("yellow_fever_entry", "Entry requirement: YF certificate due to itinerary/arrival.");
+      }
+      if (hasMalariaRisk(trip)) {
+        pushBranch("malaria", "Malaria risk present in selected destination(s).");
+      }
+      if (foodWaterRiskMedium(trip)) {
+        pushBranch("typhoid", "Food & water illness risk (typhoid) is medium/high.");
+        pushBranch("td", "Self-treatment for traveler’s diarrhea recommended.");
+      }
+      if (rabiesMediumOrHigher(trip, trip.activities)) {
+        pushBranch("rabies", "Rabies risk with planned animal exposure/rural travel.");
+      }
+      if (needsAltitude(trip)) {
+        pushBranch("altitude", "Planned sleep altitude ≥ 2500 m.");
+      }
+
+      return plan;
+    }
+
+    const Section = ({ title, children }) => (
+      <div className="rounded-2xl border p-5 shadow-sm bg-white">
+        <h2 className="text-lg font-semibold mb-3">{title}</h2>
+        {children}
+      </div>
+    );
+
+    const Tag = ({ children }) => (
+      <span className="px-2 py-0.5 rounded-full border text-xs mr-1 mb-1 inline-block bg-slate-50">{children}</span>
+    );
+
+    function App() {
+      const [traveler, setTraveler] = useState({
+        age: 34,
+        sex: "F",
+        pregnant: false,
+        immunocompromised: false,
+        allergies: [],
+        conditions: [],
+        renal_crcl: 100,
+        qt_history: false,
+      });
+
+      const [trip, setTrip] = useState({
+        countries: ["Kenya"],
+        regions: ["Masai Mara"],
+        length_days: 10,
+        altitude_m: 1500,
+        activities: ["safari", "rural"],
+        arriving_from_endemic_country: true,
+      });
+
+      const plan = useMemo(() => evaluate(traveler, trip), [traveler, trip]);
+
+      const toggle = (arr, val) => (arr.includes(val) ? arr.filter((x) => x !== val) : [...arr, val]);
+
+      return (
+        <div className="min-h-screen w-full">
+          <div className="max-w-6xl mx-auto p-6 space-y-6">
+            <header className="flex items-center justify-between">
+              <div>
+                <h1 className="text-2xl font-bold">Voyax Travel Med Recommender</h1>
+                <p className="text-sm text-slate-600">Single-file prototype. Edit inputs → instant plan. Not medical advice.</p>
+              </div>
+            </header>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <Section title="Traveler Intake">
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="col-span-1 text-sm">Age
+                    <input type="number" value={traveler.age} onChange={(e)=>setTraveler({...traveler, age: Number(e.target.value)})} className="mt-1 w-full rounded-lg border px-2 py-1"/>
+                  </label>
+                  <label className="col-span-1 text-sm">Sex
+                    <select value={traveler.sex} onChange={(e)=>setTraveler({...traveler, sex: e.target.value})} className="mt-1 w-full rounded-lg border px-2 py-1">
+                      <option>M</option><option>F</option><option>Other</option>
+                    </select>
+                  </label>
+                  <label className="col-span-1 text-sm">Pregnant
+                    <input type="checkbox" checked={traveler.pregnant} onChange={(e)=>setTraveler({...traveler, pregnant: e.target.checked})} className="ml-2"/>
+                  </label>
+                  <label className="col-span-1 text-sm">Immunocompromised
+                    <input type="checkbox" checked={traveler.immunocompromised} onChange={(e)=>setTraveler({...traveler, immunocompromised: e.target.checked})} className="ml-2"/>
+                  </label>
+                  <label className="col-span-1 text-sm">Renal CrCl (mL/min)
+                    <input type="number" value={traveler.renal_crcl ?? 100} onChange={(e)=>setTraveler({...traveler, renal_crcl: Number(e.target.value)})} className="mt-1 w-full rounded-lg border px-2 py-1"/>
+                  </label>
+                  <label className="col-span-1 text-sm">QT history
+                    <input type="checkbox" checked={traveler.qt_history} onChange={(e)=>setTraveler({...traveler, qt_history: e.target.checked})} className="ml-2"/>
+                  </label>
+                </div>
+                <div className="mt-4">
+                  <p className="text-sm font-medium">Allergies</p>
+                  {"egg gelatin neomycin macrolide quinolone sulfa".split(" ").map((a)=>(
+                    <button key={a} onClick={()=>setTraveler({...traveler, allergies: toggle(traveler.allergies, a)})} className={`mr-2 mt-2 px-3 py-1 rounded-full border ${traveler.allergies.includes(a)?"bg-blue-600 text-white":"bg-white"}`}>{a}</button>
+                  ))}
+                </div>
+                <div className="mt-4">
+                  <p className="text-sm font-medium">Conditions</p>
+                  {"anxiety depression psychosis seizure tendon_disorder conduction".split(" ").map((c)=>(
+                    <button key={c} onClick={()=>setTraveler({...traveler, conditions: toggle(traveler.conditions, c)})} className={`mr-2 mt-2 px-3 py-1 rounded-full border ${traveler.conditions.includes(c)?"bg-blue-600 text-white":"bg-white"}`}>{c}</button>
+                  ))}
+                </div>
+              </Section>
+
+              <Section title="Trip Details">
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="col-span-2 text-sm">Countries
+                    <select multiple value={trip.countries} onChange={(e)=>{
+                      const vals = Array.from(e.target.selectedOptions).map(o=>o.value);
+                      setTrip({...trip, countries: vals});
+                    }} className="mt-1 w-full rounded-lg border px-2 py-2 h-28">
+                      {Object.keys(COUNTRY_DB).map((c)=>(<option key={c}>{c}</option>))}
+                    </select>
+                  </label>
+                  <label className="col-span-2 text-sm">Regions/Areas (comma‑separated)
+                    <input value={trip.regions.join(", ")} onChange={(e)=>setTrip({...trip, regions: e.target.value.split(",").map(s=>s.trim()).filter(Boolean)})} className="mt-1 w-full rounded-lg border px-2 py-1"/>
+                  </label>
+                  <label className="col-span-1 text-sm">Trip length (days)
+                    <input type="number" value={trip.length_days} onChange={(e)=>setTrip({...trip, length_days: Number(e.target.value)})} className="mt-1 w-full rounded-lg border px-2 py-1"/>
+                  </label>
+                  <label className="col-span-1 text-sm">Max sleep altitude (m)
+                    <input type="number" value={trip.altitude_m ?? 0} onChange={(e)=>setTrip({...trip, altitude_m: Number(e.target.value)})} className="mt-1 w-full rounded-lg border px-2 py-1"/>
+                  </label>
+                  <label className="col-span-2 text-sm">Arriving from YF‑endemic country?
+                    <input type="checkbox" checked={trip.arriving_from_endemic_country ?? false} onChange={(e)=>setTrip({...trip, arriving_from_endemic_country: e.target.checked})} className="ml-2"/>
+                  </label>
+                </div>
+                <div className="mt-4">
+                  <p className="text-sm font-medium">Activities / Exposures</p>
+                  {[
+                    {id:"urban", label:"Urban"},
+                    {id:"rural", label:"Rural"},
+                    {id:"safari", label:"Safari"},
+                    {id:"animal_contact", label:"Animal contact"},
+                    {id:"hiking", label:"Hiking"},
+                  ].map(a=> (
+                    <button key={a.id} onClick={()=>setTrip({...trip, activities: toggle(trip.activities, a.id)})} className={`mr-2 mt-2 px-3 py-1 rounded-full border ${trip.activities.includes(a.id)?"bg-emerald-600 text-white":"bg-white"}`}>{a.label}</button>
+                  ))}
+                </div>
+              </Section>
+            </div>
+
+            <Section title="Recommendations">
+              {plan.length === 0 ? (
+                <p className="text-sm text-slate-600">No branches triggered with current inputs.</p>
+              ) : (
+                <div className="space-y-4">
+                  {plan.map((r, idx) => (
+                    <div key={idx} className="rounded-xl border p-4 bg-slate-50">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <h3 className="font-semibold">{r.label}</h3>
+                          <div className="mt-1 text-xs text-slate-600">Branch: <span className="font-mono">{r.branch}</span></div>
+                        </div>
+                      </div>
+                      <div className="mt-3">
+                        <p className="text-sm font-medium">Why recommended</p>
+                        <div className="mt-1">
+                          {r.reason.map((x, i) => (<Tag key={i}>{x}</Tag>))}
+                        </div>
+                      </div>
+                      {r.cautions?.length ? (
+                        <div className="mt-3">
+                          <p className="text-sm font-medium">Cautions</p>
+                          <ul className="list-disc list-inside text-sm text-amber-800">
+                            {r.cautions.map((c, i) => (<li key={i}>{c}</li>))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {r.notes?.length ? (
+                        <div className="mt-3">
+                          <p className="text-sm font-medium">Notes</p>
+                          <ul className="list-disc list-inside text-sm">
+                            {r.notes.map((n, i) => (<li key={i}>{n}</li>))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {r.excluded?.length ? (
+                        <div className="mt-3">
+                          <p className="text-sm font-medium">Other options excluded</p>
+                          <ul className="list-disc list-inside text-sm text-slate-700">
+                            {r.excluded.map((ex, i) => (
+                              <li key={i}><span className="font-mono">{ex.productId}</span>: {ex.reason}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Section>
+
+            <footer className="text-xs text-slate-500 pt-4">* Prototype logic only. Not a substitute for clinical judgment or official guidance.</footer>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
